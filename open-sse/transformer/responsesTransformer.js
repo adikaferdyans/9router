@@ -6,6 +6,7 @@
 
 import fs from "fs";
 import path from "path";
+import { filterChinese } from "../utils/chineseFilter.js";
 
 // Create log directory for responses (Node.js only)
 export function createResponsesLogger(model, logsDir = null) {
@@ -302,12 +303,12 @@ export function createResponsesApiTransformStream(logger = null) {
         // Handle reasoning_content (OpenAI native format)
         if (delta.reasoning_content) {
           startReasoning(controller, idx);
-          emitReasoningDelta(controller, delta.reasoning_content);
+          emitReasoningDelta(controller, filterChinese(delta.reasoning_content));
         }
 
         // Handle text content (may contain <think> tags)
         if (delta.content) {
-          let content = delta.content;
+          let content = filterChinese(delta.content);
 
           if (content.includes("<think>")) {
             state.inThinking = true;

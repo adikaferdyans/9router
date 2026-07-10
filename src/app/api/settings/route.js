@@ -3,6 +3,7 @@ import { getSettings, updateSettings } from "@/lib/localDb";
 import { applyOutboundProxyEnv } from "@/lib/network/outboundProxy";
 import { resetComboRotation } from "open-sse/services/combo.js";
 import bcrypt from "bcryptjs";
+import { setChineseFilterEnabled } from "open-sse/utils/chineseFilter.js";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -106,6 +107,11 @@ export async function PATCH(request) {
           configureQuotaAutoPing(settings);
         })
         .catch((error) => console.warn("[AutoPing] settings update failed:", error.message));
+    }
+
+    // Sync Chinese character filter toggle to runtime cache
+    if (Object.prototype.hasOwnProperty.call(body, "chineseFilterEnabled")) {
+      setChineseFilterEnabled(Boolean(body.chineseFilterEnabled));
     }
 
     const { password, oidcClientSecret, ...safeSettings } = settings;

@@ -7,6 +7,7 @@ import { getOpenAIResponsesEventName, isOpenAIResponsesTerminalEvent, formatInco
 import { dbg, isDebugEnabled } from "./debugLog.js";
 
 import { SSE_DONE, SSE_HEADERS, SSE_HEADERS_NO_BUFFER } from "./sseConstants.js";
+import { filterChinese } from "./chineseFilter.js";
 
 export { COLORS, formatSSE };
 export { SSE_DONE, SSE_HEADERS, SSE_HEADERS_NO_BUFFER };
@@ -102,10 +103,11 @@ export function createSSEStream(options = {}) {
         if (mode === STREAM_MODE.PASSTHROUGH) {
           let output;
           let injectedUsage = false;
+          let parsed = null;  // hoist out of try-scope so the re-serialization path below can access it
 
           if (trimmed.startsWith("data:") && trimmed.slice(5).trim() !== "[DONE]") {
             try {
-              const parsed = JSON.parse(trimmed.slice(5).trim());
+              parsed = JSON.parse(trimmed.slice(5).trim());
 
               const idFixed = fixInvalidId(parsed);
 
@@ -149,15 +151,17 @@ export function createSSEStream(options = {}) {
               }
 
               const delta = parsed.choices?.[0]?.delta;
-              const content = delta?.content;
-              const reasoning = delta?.reasoning_content;
-              if (content && typeof content === "string") {
-                totalContentLength += content.length;
-                accumulatedContent += content;
+              if (delta?.content && typeof delta.content === "string") {
+                const filtered = filterChinese(delta.content);
+                delta.content = filtered;
+                totalContentLength += filtered.length;
+                accumulatedContent += filtered;
               }
-              if (reasoning && typeof reasoning === "string") {
-                totalContentLength += reasoning.length;
-                accumulatedThinking += reasoning;
+              if (delta?.reasoning_content && typeof delta.reasoning_content === "string") {
+                const filtered = filterChinese(delta.reasoning_content);
+                delta.reasoning_content = filtered;
+                totalContentLength += filtered.length;
+                accumulatedThinking += filtered;
               }
 
               const extracted = extractUsage(parsed);
@@ -190,8 +194,13 @@ export function createSSEStream(options = {}) {
           }
 
           if (!injectedUsage) {
-            if (line.startsWith("data:") && !line.startsWith("data: ")) {
-              output = "data: " + line.slice(5) + "\n";
+            // Must re-serialize the (potentially Chinese-filtered) parsed object
+            // because filterChinese() modified delta.content in-place above.
+            // Using raw 'line' would bypass the filter and send original Chinese text.
+            // Guard: parsed can be null if JSON.parse failed and we didn't `continue`
+            // (defensive — current catch does continue, but keep this robust).
+            if (parsed && trimmed.startsWith("data:") && trimmed.slice(5).trim() !== "[DONE]") {
+              output = `data: ${JSON.stringify(parsed)}\n`;
             } else {
               output = line + "\n";
             }
@@ -243,31 +252,41 @@ export function createSSEStream(options = {}) {
 
         // Claude format - content
         if (parsed.delta?.text) {
-          totalContentLength += parsed.delta.text.length;
-          accumulatedContent += parsed.delta.text;
+          const filtered = filterChinese(parsed.delta.text);
+          parsed.delta.text = filtered;
+          totalContentLength += filtered.length;
+          accumulatedContent += filtered;
         }
         // Claude format - thinking
         if (parsed.delta?.thinking) {
-          totalContentLength += parsed.delta.thinking.length;
-          accumulatedThinking += parsed.delta.thinking;
+          const filtered = filterChinese(parsed.delta.thinking);
+          parsed.delta.thinking = filtered;
+          totalContentLength += filtered.length;
+          accumulatedThinking += filtered;
         }
         
         // OpenAI format - content
         if (parsed.choices?.[0]?.delta?.content) {
-          totalContentLength += parsed.choices[0].delta.content.length;
-          accumulatedContent += parsed.choices[0].delta.content;
+          const filtered = filterChinese(parsed.choices[0].delta.content);
+          parsed.choices[0].delta.content = filtered;
+          totalContentLength += filtered.length;
+          accumulatedContent += filtered;
         }
         // OpenAI format - reasoning
         if (parsed.choices?.[0]?.delta?.reasoning_content) {
-          totalContentLength += parsed.choices[0].delta.reasoning_content.length;
-          accumulatedThinking += parsed.choices[0].delta.reasoning_content;
+          const filtered = filterChinese(parsed.choices[0].delta.reasoning_content);
+          parsed.choices[0].delta.reasoning_content = filtered;
+          totalContentLength += filtered.length;
+          accumulatedThinking += filtered;
         }
         
         // Gemini format
         if (parsed.candidates?.[0]?.content?.parts) {
           for (const part of parsed.candidates[0].content.parts) {
             if (part.text && typeof part.text === "string") {
-              totalContentLength += part.text.length;
+              const filtered = filterChinese(part.text);
+              part.text = filtered;
+              totalContentLength += filtered.length;
               // Check if this is thinking content
               if (part.thought === true) {
                 accumulatedThinking += part.text;

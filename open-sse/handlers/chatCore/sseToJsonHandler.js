@@ -8,6 +8,7 @@ import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLin
 // Responses-API providers (e.g. codex) may emit SSE without content-type + use Responses output shape
 const isResponsesProvider = (p) => PROVIDERS[p]?.format === FORMATS.OPENAI_RESPONSES;
 import { saveRequestDetail, appendRequestLog } from "@/lib/usageDb.js";
+import { filterChinese } from "../../utils/chineseFilter.js";
 
 function textFromResponsesMessageItem(item) {
   if (!item?.content || !Array.isArray(item.content)) return "";
@@ -134,6 +135,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, pr
       if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime } }));
 
       const { msgItem, textContent } = pickAssistantMessageForChatCompletion(jsonResponse.output);
+      const filteredContent = filterChinese(textContent || "");
       const totalLatency = Date.now() - requestStartTime;
 
       saveRequestDetail(buildRequestDetail({
@@ -169,14 +171,14 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, pr
       if (sourceFormat === FORMATS.ANTIGRAVITY || sourceFormat === FORMATS.GEMINI || sourceFormat === FORMATS.GEMINI_CLI) {
         finalResp = {
           response: {
-            candidates: [{ content: { role: "model", parts: [{ text: textContent || "" }] }, finishReason: "STOP", index: 0 }],
+            candidates: [{ content: { role: "model", parts: [{ text: filteredContent }] }, finishReason: "STOP", index: 0 }],
             usageMetadata: { promptTokenCount: inTokens, candidatesTokenCount: outTokens, totalTokenCount: inTokens + outTokens },
             modelVersion: model,
             responseId: jsonResponse.id || `resp_${Date.now()}`
           }
         };
       } else {
-        const message = { role: "assistant", content: textContent || (hasToolCalls ? null : "") };
+        const message = { role: "assistant", content: filteredContent || (hasToolCalls ? null : "") };
         if (hasToolCalls) message.tool_calls = toolCalls;
         const responseDone = jsonResponse.status === "completed" || jsonResponse.status === "done";
         const finishReason = hasToolCalls ? "tool_calls" : (responseDone ? "stop" : (jsonResponse.status || "stop"));
@@ -235,6 +237,9 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, pr
     // Previously this was unconditional, which broke Qwen3.5, Claude extended thinking, etc.
     if (parsed?.choices) {
       for (const choice of parsed.choices) {
+        if (choice?.message?.content && typeof choice.message.content === 'string') {
+          choice.message.content = filterChinese(choice.message.content);
+        }
         if (choice?.message?.reasoning_content && choice.message.content) {
           delete choice.message.reasoning_content;
         }

@@ -57,6 +57,7 @@ export default function TokenSaverClient() {
   const [showPxpipeModal, setShowPxpipeModal] = useState(false);
   const [pxpipeActionLoading, setPxpipeActionLoading] = useState(false);
   const [pxpipeActionError, setPxpipeActionError] = useState("");
+  const [chineseFilterEnabled, setChineseFilterEnabled] = useState(false);
   const [locale, setLocale] = useState("en");
 
   const { copied, copy } = useCopyToClipboard();
@@ -406,6 +407,11 @@ export default function TokenSaverClient() {
     patchSetting({ pxpipeMinChars: next });
   };
 
+  const handleChineseFilterEnabled = (value) => {
+    setChineseFilterEnabled(value);
+    patchSetting({ chineseFilterEnabled: value });
+  };
+
   useEffect(() => {
     const loadSettings = async () => {
       try {
@@ -423,6 +429,7 @@ export default function TokenSaverClient() {
           setPonytailLevel(data.ponytailLevel || "full");
           setPxpipeEnabled(!!data.pxpipeEnabled);
           if (typeof data.pxpipeMinChars === "number") setPxpipeMinChars(data.pxpipeMinChars);
+          setChineseFilterEnabled(!!data.chineseFilterEnabled);
           refreshHeadroomStatus();
           // PRD: run the PXPIPE health check automatically when the page opens
           refreshPxpipeStatus().then(runPxpipeHealth);
@@ -681,6 +688,21 @@ export default function TokenSaverClient() {
               onChange={() => handleCavemanEnabled(!cavemanEnabled)}
             />
           </div>
+        </div>
+        <div className="flex items-center justify-between pt-4 mt-4 border-t border-border gap-4 flex-wrap">
+          <div className="min-w-0 flex-1">
+            <p className="font-medium">
+              Chinese Character Filter
+            </p>
+            <p className="text-sm text-text-muted">
+              Strip accidental Hanzi leakage (e.g. 咯, 的, 了) from AI
+              responses → zero overhead (~0.0002ms)
+            </p>
+          </div>
+          <Toggle
+            checked={chineseFilterEnabled}
+            onChange={() => handleChineseFilterEnabled(!chineseFilterEnabled)}
+          />
         </div>
         <div className="flex items-center justify-between pt-4 mt-4 border-t border-border gap-4 flex-wrap">
           <div className="min-w-0 flex-1">

@@ -47,6 +47,7 @@ const DEFAULT_SETTINGS = {
   pxpipeAutoInstall: true,
   pxpipeMinChars: 25000,
   pxpipeTimeoutMs: 15000,
+  chineseFilterEnabled: false,
 };
 
 async function readRaw() {
@@ -57,6 +58,13 @@ async function readRaw() {
 
 // Merge raw settings with defaults; backward-compat for missing keys
 function mergeWithDefaults(raw) {
+  // Backward compat: map old key cjkFilterEnabled → chineseFilterEnabled
+  if (raw && raw.cjkFilterEnabled !== undefined) {
+    if (raw.chineseFilterEnabled === undefined) {
+      raw.chineseFilterEnabled = raw.cjkFilterEnabled;
+    }
+    delete raw.cjkFilterEnabled;
+  }
   const merged = { ...DEFAULT_SETTINGS, ...(raw || {}) };
   for (const [key, defVal] of Object.entries(DEFAULT_SETTINGS)) {
     if (merged[key] === undefined) {

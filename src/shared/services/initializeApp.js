@@ -16,6 +16,7 @@ import {
 import { getMitmStatus, startMitm, loadEncryptedPassword, initDbHooks, restoreToolDNS, removeAllDNSEntriesSync } from "@/mitm/manager";
 import { syncToJson as syncMitmAliasCache } from "@/lib/mitmAliasCache";
 import { killAllBridges } from "@/lib/mcp/stdioSseBridge";
+import { setChineseFilterEnabled } from "open-sse/utils/chineseFilter.js";
 
 // Inject correct paths and DB hooks into manager.js (CJS) from ESM context
 (function bootstrapMitm() {
@@ -30,7 +31,7 @@ import { killAllBridges } from "@/lib/mcp/stdioSseBridge";
   try { initDbHooks(getSettings, updateSettings); } catch { /* ignore */ }
 })();
 
-process.setMaxListeners(20);
+process.setMaxListeners(50);
 
 // Defer heavy startup work so the first HTTP request (login → dashboard) isn't
 // starved by DB cleanup, cloudflared download, lsof/DNS probes and OAuth pings.
@@ -53,6 +54,32 @@ export async function initializeApp() {
   try {
     // Register cleanup + exit-respawn callback immediately so signals and
     // unexpected cloudflared exits are handled even during the deferred window.
+    await cleanupProviderConnections();
+    const settings = await getSettings();
+
+    // Load Chinese character filter config from settings (once per process).
+    // Sync Chinese character filter state so it's active even if the API route handler
+    // hasn't yet called its own ensureInitialized().
+    try {
+      setChineseFilterEnabled(Boolean(settings.chineseFilterEnabled));
+    } catch (e) {
+      console.error("[InitApp] Failed to load Chinese character filter config:", e.message);
+    }
+
+    // Auto-resume tunnel (once per process)
+    if (settings.tunnelEnabled && !g.tunnelAutoResumed) {
+      g.tunnelAutoResumed = true;
+      console.log("[InitApp] Tunnel was enabled, auto-resuming...");
+      safeRestartTunnel("startup").catch((e) => console.log("[InitApp] Tunnel resume failed:", e.message));
+    }
+
+    // Auto-resume tailscale (once per process)
+    if (settings.tailscaleEnabled && !g.tailscaleAutoResumed) {
+      g.tailscaleAutoResumed = true;
+      console.log("[InitApp] Tailscale was enabled, auto-resuming...");
+      safeRestartTailscale("startup").catch((e) => console.log("[InitApp] Tailscale resume failed:", e.message));
+    }
+
     if (!g.signalHandlersRegistered) {
       const cleanup = () => {
         try { removeAllDNSEntriesSync(); } catch { /* best effort */ }

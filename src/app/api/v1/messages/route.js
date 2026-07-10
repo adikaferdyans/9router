@@ -1,5 +1,7 @@
 import { handleChat } from "@/sse/handlers/chat.js";
 import { initTranslators } from "open-sse/translator/index.js";
+import { getSettings } from "@/lib/localDb";
+import { setChineseFilterEnabled } from "open-sse/utils/chineseFilter";
 
 let initialized = false;
 
@@ -9,6 +11,12 @@ let initialized = false;
 async function ensureInitialized() {
   if (!initialized) {
     await initTranslators();
+    try {
+      const settings = await getSettings();
+      setChineseFilterEnabled(Boolean(settings.chineseFilterEnabled));
+    } catch (e) {
+      console.warn("[ChineseFilter] Failed to init filter from settings:", e.message);
+    }
     initialized = true;
   }
 }

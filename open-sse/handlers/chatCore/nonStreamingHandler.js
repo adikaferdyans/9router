@@ -9,6 +9,7 @@ import { parseSSEToOpenAIResponse } from "./sseToJsonHandler.js";
 import { buildRequestDetail, extractRequestConfig, extractUsageFromResponse, saveUsageStats, formatDoneLine } from "./requestDetail.js";
 import { appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { decloakToolNames } from "../../utils/claudeCloaking.js";
+import { filterChinese } from "../../utils/chineseFilter.js";
 
 function parseToolArguments(value) {
   if (!value) return {};
@@ -278,6 +279,26 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     for (const choice of translatedResponse.choices) {
       if (choice?.message?.reasoning_content && choice.message.content) {
         delete choice.message.reasoning_content;
+      }
+    }
+  }
+
+  // Apply Chinese character filter to response content (before sending to client)
+  if (!isClaudeMessageResponse && translatedResponse?.choices) {
+    for (const choice of translatedResponse.choices) {
+      if (choice?.message?.content && typeof choice.message.content === 'string') {
+        choice.message.content = filterChinese(choice.message.content);
+      }
+      if (choice?.message?.reasoning_content && typeof choice.message.reasoning_content === 'string') {
+        choice.message.reasoning_content = filterChinese(choice.message.reasoning_content);
+      }
+    }
+  }
+  // Claude-format responses store content in an array
+  if (isClaudeMessageResponse && translatedResponse?.content) {
+    for (const block of translatedResponse.content) {
+      if (block.text && typeof block.text === 'string') {
+        block.text = filterChinese(block.text);
       }
     }
   }
