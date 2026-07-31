@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const fetchMock = vi.fn();
 global.fetch = fetchMock;
 
-const { normalizeModelEntry, getModelCatalog, invalidateModelsCache, normalizeRoutingConfig, isValidRoutingField } =
+const { normalizeModelEntry, getModelCatalog, getKeyInfo, invalidateModelsCache, normalizeRoutingConfig, isValidRoutingField, applyRoutingToBody } =
   await import("../../src/lib/openrouter/service.js");
 
 beforeEach(() => {
