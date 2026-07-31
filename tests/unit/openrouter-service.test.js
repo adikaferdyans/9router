@@ -163,3 +163,109 @@ describe("isValidRoutingField", () => {
     expect(isValidRoutingField("ORDER")).toBe(false); // case-sensitive
   });
 });
+
+describe("getKeyInfo", () => {
+  it("fetches key info from OpenRouter /key endpoint and unwraps data", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: {
+          label: "sk-or-v1-test123",
+          limit: 100,
+          limit_remaining: 74.5,
+          limit_reset: "monthly",
+          usage: 25.5,
+          usage_daily: 5.2,
+          usage_weekly: 15.3,
+          usage_monthly: 25.5,
+          is_free_tier: false,
+          rate_limit: { interval: "1h", requests: 1000 },
+        },
+      }),
+    });
+
+    const result = await getKeyInfo("sk-or-test");
+    expect(result.label).toBe("sk-or-v1-test123");
+    expect(result.limit).toBe(100);
+    expect(result.limit_remaining).toBe(74.5);
+    expect(result.limit_reset).toBe("monthly");
+    expect(result.usage).toBe(25.5);
+    expect(result.usage_daily).toBe(5.2);
+    expect(result.is_free_tier).toBe(false);
+  });
+
+  it("handles unwrapped response (no data wrapper)", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        label: "sk-or-v1-flat",
+        limit: null,
+        limit_remaining: null,
+        usage: 0,
+        is_free_tier: true,
+      }),
+    });
+
+    const result = await getKeyInfo("sk-or-test-flat");
+    expect(result.label).toBe("sk-or-v1-flat");
+    expect(result.limit).toBeNull();
+    expect(result.is_free_tier).toBe(true);
+  });
+
+  it("throws on 401 (invalid API key)", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: { message: "Missing Authentication header" } }),
+      text: async () => "",
+    });
+
+    let error = null;
+    try {
+      await getKeyInfo("bad-key");
+    } catch (e) {
+      error = e;
+    }
+    expect(error).not.toBeNull();
+    expect(error.status).toBe(401);
+  });
+
+  it("throws when API key is missing", async () => {
+    await expect(getKeyInfo("")).rejects.toThrow("API key is required");
+    await expect(getKeyInfo(null)).rejects.toThrow("API key is required");
+  });
+});
+
+describe("applyRoutingToBody (service layer)", () => {
+  it("injects routing from credentials into body.provider for openrouter", () => {
+    const body = { model: "anthropic/claude-3", messages: [] };
+    const creds = {
+      providerSpecificData: { openrouterRouting: { order: ["openai"] } },
+    };
+    applyRoutingToBody(body, "openrouter", creds);
+    expect(body.provider).toEqual({ order: ["openai"] });
+  });
+
+  it("does NOT override existing body.provider (client override)", () => {
+    const body = { model: "anthropic/claude-3", provider: { only: ["google"] } };
+    const creds = {
+      providerSpecificData: { openrouterRouting: { order: ["openai"] } },
+    };
+    applyRoutingToBody(body, "openrouter", creds);
+    expect(body.provider).toEqual({ only: ["google"] });
+  });
+
+  it("is a no-op for non-openrouter provider", () => {
+    const body = { model: "gpt-4o", messages: [] };
+    applyRoutingToBody(body, "openai", {
+      providerSpecificData: { openrouterRouting: { order: ["openai"] } },
+    });
+    expect(body.provider).toBeUndefined();
+  });
+
+  it("is a no-op when no routing config exists", () => {
+    const body = { model: "anthropic/claude-3", messages: [] };
+    applyRoutingToBody(body, "openrouter", { providerSpecificData: {} });
+    expect(body.provider).toBeUndefined();
+  });
+});
