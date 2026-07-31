@@ -12,7 +12,7 @@ import { cn } from "@/shared/utils/cn";
  *  - Provider mode (auto / preferred / strict) — stored under settings.openrouterPreferences
  *  - Provider order/selection (which upstream providers OpenRouter may route to)
  *  - Reasoning settings when the selected model supports it
- *  - Pricing display fetched from a backend endpoint
+ *  - Pricing display from the live model catalog (model-level pricing, not per-provider)
  *
  * All fetch calls are isolated and fail gracefully — no backend route modifications
  * are required. Preferences are persisted via the existing /api/settings PATCH route
@@ -40,20 +40,18 @@ const KNOWN_UPSTREAM_PROVIDERS = [
   "Together", "Fireworks", "Groq", "Hyperbolic", "Infermatic",
 ];
 
+/**
+ * Format a per-token price (dollars per token from OpenRouter) as /M tokens.
+ * OpenRouter returns e.g. 0.0000025 (per token) → display as $2.50/M
+ */
 function formatPrice(perToken) {
   const n = Number(perToken);
-  /**
-   * Format a per-token price (dollars per token from OpenRouter) as /M tokens.
-   * OpenRouter returns e.g. 0.0000025 (per token) → display as $2.50/M
-   */
-  function formatPricePerToken(perTokenPrice) {
-    const n = Number(perTokenPrice);
-    if (!Number.isFinite(n)) return "—";
-    if (n === 0) return "Free";
-    const perMillion = n * 1_000_000;
-    if (perMillion < 0.01) return `$${perMillion.toFixed(4)}/M`;
-    return `$${perMillion.toFixed(2)}/M`;
-  }
+  if (!Number.isFinite(n)) return "—";
+  if (n === 0) return "Free";
+  const perMillion = n * 1_000_000;
+  if (perMillion < 0.01) return `$${perMillion.toFixed(4)}/M`;
+  return `$${perMillion.toFixed(2)}/M`;
+}
 
 export default function OpenRouterControl({ providerId }) {
   const [prefs, setPrefs] = useState(null);

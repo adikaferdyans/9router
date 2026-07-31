@@ -13,8 +13,8 @@ import { cn } from "@/shared/utils/cn";
  * alongside the ProviderLimits component.
  *
  * Data sources (all fetched client-side, fail gracefully):
- *  - /api/providers — to find the active OpenRouter connection
- *  - /api/usage/:connectionId — quota data (if the backend supports OpenRouter)
+ *  - /api/openrouter/credits — key info from OpenRouter GET /api/v1/key endpoint
+ *    (returns limit, limit_remaining, usage, usage_daily/weekly/monthly, is_free_tier)
  *  - /api/settings — openrouterPreferences (read-only display of current mode)
  *
  * States: loading → loaded | error | empty (no connection)
@@ -27,14 +27,6 @@ function formatUsd(value) {
   if (n === 0) return "$0.00";
   if (n < 0.01) return `$${n.toFixed(4)}`;
   return `$${n.toFixed(2)}`;
-}
-
-function formatNumber(value) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return "—";
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return String(n);
 }
 
 function timeAgo(date) {
@@ -58,37 +50,23 @@ export default function OpenRouterAccountCard() {
     setRefreshing(true);
     setError("");
     try {
-      // Step 1: find the OpenRouter connection
-      const providersRes = await fetch("/api/providers", { cache: "no-store" });
-      if (!providersRes.ok) throw new Error("Failed to fetch providers");
-      const providersData = await providersRes.json();
-      const connections = (providersData.connections || []).filter(
-        (c) => c.provider === "openrouter" && c.isActive !== false,
-      );
-
-      if (connections.length === 0) {
+      // Step 1: fetch credit info from the OpenRouter backend (uses the user's
+      // active OpenRouter connection API key to call GET /api/v1/key on OpenRouter).
+      // The backend handles connection lookup internally.
+      const creditsRes = await fetch("/api/openrouter/credits", { cache: "no-store" });
+      if (creditsRes.status === 404) {
         setState("empty");
         setAccount(null);
         setLastSynced(new Date());
         return;
       }
-
-      const connection = connections[0];
-
-      // Step 2: try to fetch quota from the existing usage endpoint.
-      // OpenRouter quota may not be fully supported by the backend — that's OK.
-      // We also try the OpenRouter credits endpoint pattern via the usage route.
-      let quotaData = null;
-      try {
-        const quotaRes = await fetch(`/api/usage/${connection.id}`, { cache: "no-store" });
-        if (quotaRes.ok) {
-          quotaData = await quotaRes.json();
-        }
-      } catch {
-        // Quota fetch is best-effort
+      if (!creditsRes.ok) {
+        const errBody = await creditsRes.json().catch(() => ({}));
+        throw new Error(errBody.error || "Failed to fetch OpenRouter credit info");
       }
+      const creditsData = await creditsRes.json();
 
-      // Step 3: fetch OpenRouter preferences for mode display
+      // Step 2: fetch OpenRouter preferences for mode display
       let prefs = null;
       try {
         const settingsRes = await fetch("/api/settings", { cache: "no-store" });
@@ -101,8 +79,9 @@ export default function OpenRouterAccountCard() {
       }
 
       setAccount({
-        connection,
-        quota: quotaData,
+        credits: creditsData.credits || null,
+        keyInfo: creditsData.keyInfo || null,
+        connectionId: creditsData.connectionId || null,
         prefs,
       });
       setState("loaded");
@@ -125,20 +104,21 @@ export default function OpenRouterAccountCard() {
 
   // Derive display values from quota data (OpenRouter returns credits in various shapes)
   const derived = (() => {
-    if (!account?.quota) return null;
-    const q = account.quota;
-    // OpenRouter /credits returns { data: { total_credits, total_usage } }
-    // The backend may pass this through under data or raw
-    const raw = q.data || q.raw || q;
-    const totalCredits = Number(raw?.total_credits ?? raw?.totalCredits ?? 0);
-    const totalUsage = Number(raw?.total_usage ?? raw?.totalUsage ?? 0);
-    const balance = totalCredits - totalUsage;
+    const c = account?.credits;
+    if (!c) return null;
+    // The /key endpoint returns per-key limit and usage, NOT account balance.
+    // limit_remaining = remaining credits on this key (the "balance" from user perspective).
+    // limit = per-key credit cap (null if unlimited).
+    // usage = all-time credits consumed by this key.
     return {
-      totalCredits,
-      totalUsage,
-      balance,
-      plan: q.plan || raw?.plan || null,
-      rateLimit: raw?.rate_limit || raw?.rateLimit || null,
+      limitRemaining: c.limitRemaining ?? null,
+      limit: c.limit ?? null,
+      limitReset: c.limitReset ?? null,
+      usage: c.usage ?? null,
+      usageDaily: c.usageDaily ?? null,
+      usageWeekly: c.usageWeekly ?? null,
+      usageMonthly: c.usageMonthly ?? null,
+      isFreeTier: c.isFreeTier ?? null,
     };
   })();
 
@@ -224,7 +204,7 @@ export default function OpenRouterAccountCard() {
           {/* Connection info */}
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant="default" size="sm" icon="key">
-              {account.connection.name || "OpenRouter API Key"}
+              OpenRouter API Key
             </Badge>
             {account.prefs?.mode && (
               <Badge variant="info" size="sm" icon="tune">
@@ -238,53 +218,69 @@ export default function OpenRouterAccountCard() {
             )}
           </div>
 
-          {/* Credit balance */}
+          {/* Credit info from GET /api/v1/key */}
           {derived ? (
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
               <div className="rounded-[10px] border border-border-subtle bg-bg/50 p-3">
-                <p className="text-[11px] font-medium uppercase tracking-wide text-text-muted">Balance</p>
+                <p className="text-[11px] font-medium uppercase tracking-wide text-text-muted">
+                  {derived.limit != null ? "Key Limit" : "Balance"}
+                </p>
                 <p className={cn(
                   "mt-1 text-lg font-bold",
-                  derived.balance > 0 ? "text-green-600 dark:text-green-400" : "text-text-muted",
+                  derived.limitRemaining != null && derived.limitRemaining > 0
+                    ? "text-green-600 dark:text-green-400"
+                    : "text-text-muted",
                 )}>
-                  {formatUsd(derived.balance)}
+                  {derived.limitRemaining != null ? formatUsd(derived.limitRemaining) : "Unlimited"}
                 </p>
               </div>
+              {derived.limit != null && (
+                <div className="rounded-[10px] border border-border-subtle bg-bg/50 p-3">
+                  <p className="text-[11px] font-medium uppercase tracking-wide text-text-muted">Key Cap</p>
+                  <p className="mt-1 text-lg font-bold text-text-main">
+                    {formatUsd(derived.limit)}
+                  </p>
+                </div>
+              )}
               <div className="rounded-[10px] border border-border-subtle bg-bg/50 p-3">
-                <p className="text-[11px] font-medium uppercase tracking-wide text-text-muted">Total Credits</p>
+                <p className="text-[11px] font-medium uppercase tracking-wide text-text-muted">Total Used</p>
                 <p className="mt-1 text-lg font-bold text-text-main">
-                  {formatUsd(derived.totalCredits)}
-                </p>
-              </div>
-              <div className="col-span-2 rounded-[10px] border border-border-subtle bg-bg/50 p-3 sm:col-span-1">
-                <p className="text-[11px] font-medium uppercase tracking-wide text-text-muted">Used</p>
-                <p className="mt-1 text-lg font-bold text-text-main">
-                  {formatUsd(derived.totalUsage)}
+                  {formatUsd(derived.usage)}
                 </p>
               </div>
             </div>
           ) : (
             <div className="rounded-[10px] border border-dashed border-border-subtle bg-bg/30 p-4 text-center">
               <p className="text-xs text-text-muted">
-                Account quota details are not available from the backend yet.
+                No OpenRouter connection found or key info unavailable.
               </p>
               <p className="mt-1 text-[11px] text-text-muted opacity-70">
-                Ensure your OpenRouter connection is active. Credit data appears here once the backend exposes it.
+                Add an OpenRouter API key in Providers to see credit data here.
               </p>
             </div>
           )}
 
-          {/* Rate limit info (if available) */}
-          {derived?.rateLimit && (
+          {/* Usage breakdown + free tier status */}
+          {derived && (
             <div className="flex flex-wrap items-center gap-2 text-xs">
-              {derived.rateLimit.requests != null && (
-                <Badge variant="warning" size="sm" icon="speed">
-                  {formatNumber(derived.rateLimit.requests)} req limit
+              {derived.isFreeTier && (
+                <Badge variant="warning" size="sm" icon="info">
+                  Free tier
                 </Badge>
               )}
-              {derived.rateLimit.interval != null && (
+              {derived.usageDaily != null && (
                 <Badge variant="default" size="sm">
-                  per {derived.rateLimit.interval}
+                  Today: {formatUsd(derived.usageDaily)}
+                </Badge>
+              )}
+              {derived.usageMonthly != null && (
+                <Badge variant="default" size="sm">
+                  Month: {formatUsd(derived.usageMonthly)}
+                </Badge>
+              )}
+              {derived.limitReset && (
+                <Badge variant="default" size="sm">
+                  Resets: {derived.limitReset}
                 </Badge>
               )}
             </div>
