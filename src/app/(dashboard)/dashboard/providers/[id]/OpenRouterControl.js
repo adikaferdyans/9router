@@ -40,20 +40,26 @@ const KNOWN_UPSTREAM_PROVIDERS = [
   "Together", "Fireworks", "Groq", "Hyperbolic", "Infermatic",
 ];
 
-function formatPrice(perMillion) {
-  const n = Number(perMillion);
-  if (!Number.isFinite(n) || n === 0) return n === 0 ? "Free" : "—";
-  if (n < 0.01) return `$${n.toFixed(4)}/M`;
-  return `$${n.toFixed(2)}/M`;
-}
+function formatPrice(perToken) {
+  const n = Number(perToken);
+  /**
+   * Format a per-token price (dollars per token from OpenRouter) as /M tokens.
+   * OpenRouter returns e.g. 0.0000025 (per token) → display as $2.50/M
+   */
+  function formatPricePerToken(perTokenPrice) {
+    const n = Number(perTokenPrice);
+    if (!Number.isFinite(n)) return "—";
+    if (n === 0) return "Free";
+    const perMillion = n * 1_000_000;
+    if (perMillion < 0.01) return `$${perMillion.toFixed(4)}/M`;
+    return `$${perMillion.toFixed(2)}/M`;
+  }
 
 export default function OpenRouterControl({ providerId }) {
   const [prefs, setPrefs] = useState(null);
   const [models, setModels] = useState([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState("");
-  const [pricing, setPricing] = useState({});
-  const [pricingLoading, setPricingLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [lastSynced, setLastSynced] = useState(null);
 
@@ -88,25 +94,20 @@ export default function OpenRouterControl({ providerId }) {
     }
   }, []);
 
-  // Fetch live models from OpenRouter via the existing suggested-models backend proxy.
-  // The proxy fetches https://openrouter.ai/api/v1/models and returns the filtered set.
-  // We request the FULL catalog (type=openrouter-free only returns free ≥200k models,
-  // so we also fetch pricing separately from /api/pricing for display).
+  // Fetch live models from the OpenRouter backend catalog (/api/openrouter/models).
+  // This returns normalized model entries with model-level pricing from the user's
+  // own OpenRouter connection (authenticated). Pricing is per-model, not per-provider.
   const loadModels = useCallback(async () => {
     setModelsLoading(true);
     setModelsError("");
     try {
-      const params = new URLSearchParams({
-        url: "https://openrouter.ai/api/v1/models",
-        type: "openrouter-free",
-      });
-      const res = await fetch(`/api/providers/suggested-models?${params}`, { cache: "no-store" });
+      const res = await fetch("/api/openrouter/models", { cache: "no-store" });
       if (!res.ok) {
         setModelsError("Failed to load OpenRouter models");
         return;
       }
       const data = await res.json();
-      setModels(Array.isArray(data.data) ? data.data : []);
+      setModels(Array.isArray(data.models) ? data.models : []);
       setLastSynced(new Date());
     } catch (err) {
       setModelsError(err?.message || "Failed to load OpenRouter models");
@@ -115,31 +116,13 @@ export default function OpenRouterControl({ providerId }) {
     }
   }, []);
 
-  // Fetch pricing from the existing /api/pricing endpoint
-  const loadPricing = useCallback(async () => {
-    setPricingLoading(true);
-    try {
-      const res = await fetch("/api/pricing", { cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json();
-      // Pricing is keyed by provider alias then model id
-      setPricing(data?.openrouter || {});
-    } catch (err) {
-      // Pricing is optional — silent fail
-    } finally {
-      setPricingLoading(false);
-    }
-  }, []);
-
   const didInitRef = useRef(false);
-
   useEffect(() => {
     if (!isOpenRouter || didInitRef.current) return;
     didInitRef.current = true;
     loadPrefs();
     loadModels();
-    loadPricing();
-  }, [isOpenRouter, loadPrefs, loadModels, loadPricing]);
+  }, [isOpenRouter, loadPrefs, loadModels]);
 
   // Persist preferences
   const savePrefs = useCallback(async (next) => {
@@ -201,10 +184,8 @@ export default function OpenRouterControl({ providerId }) {
     return models.find((m) => m.id === prefs.selectedModel) || null;
   })();
 
-  const selectedModelPricing = (() => {
-    if (!prefs?.selectedModel) return null;
-    return pricing[prefs.selectedModel] || null;
-  })();
+  // Pricing comes from the model catalog (model-level, not per-provider)
+  const selectedModelPricing = selectedModelDetail?.pricing || null;
 
   // Heuristic: models from providers known for reasoning support the setting
   const modelSupportsReasoning = (() => {
@@ -242,7 +223,7 @@ export default function OpenRouterControl({ providerId }) {
             size="sm"
             variant="secondary"
             icon="refresh"
-            onClick={() => { loadModels(); loadPricing(); }}
+            onClick={() => { loadModels(); }}
             disabled={modelsLoading}
           >
             Refresh
@@ -309,28 +290,21 @@ export default function OpenRouterControl({ providerId }) {
             {selectedModelPricing ? (
               <>
                 <Badge variant="info" size="sm" icon="input">
-                  In: {formatPrice(selectedModelPricing.input)}
+                  In: {formatPrice(selectedModelPricing.prompt)}
                 </Badge>
                 <Badge variant="success" size="sm" icon="output">
-                  Out: {formatPrice(selectedModelPricing.output)}
+                  Out: {formatPrice(selectedModelPricing.completion)}
                 </Badge>
-                {selectedModelPricing.cached > 0 && (
+                {selectedModelPricing.request > 0 && (
                   <Badge variant="default" size="sm" icon="bolt">
-                    Cached: {formatPrice(selectedModelPricing.cached)}
-                  </Badge>
-                )}
-                {selectedModelPricing.reasoning > 0 && (
-                  <Badge variant="warning" size="sm" icon="psychology">
-                    Reasoning: {formatPrice(selectedModelPricing.reasoning)}
+                    Per-req: {formatPrice(selectedModelPricing.request)}
                   </Badge>
                 )}
               </>
             ) : selectedModelDetail ? (
               <Badge variant="success" size="sm" dot>Free model</Badge>
             ) : (
-              !pricingLoading && (
-                <span className="text-xs text-text-muted">Pricing not available for this model</span>
-              )
+              <span className="text-xs text-text-muted">Pricing not available for this model</span>
             )}
             {selectedModelDetail?.contextLength && (
               <Badge variant="default" size="sm" icon="menu_book">

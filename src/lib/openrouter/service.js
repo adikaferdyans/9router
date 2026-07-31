@@ -62,7 +62,9 @@ async function fetchOrThrow(url, apiKey) {
 
 /**
  * Fetch the full model/provider catalog from OpenRouter.
- * Includes pricing, context_length, supported_parameters, and per-model provider info.
+ * Includes pricing (model-level, NOT per-provider), context_length, and supported_parameters.
+ * The /models endpoint does not expose per-provider pricing breakdowns — pricing fields
+ * are at the model level and apply across all providers serving that model.
  *
  * @param {string} apiKey - OpenRouter API key
  * @param {object} [opts] - Options
@@ -89,7 +91,12 @@ export async function fetchModelCatalog(apiKey, opts = {}) {
 
 /**
  * Transform a raw OpenRouter model entry into a normalized catalog item with
- * pricing, capabilities, and provider routing info. Pure function, no I/O.
+ * model-level pricing and capabilities. Pure function, no I/O.
+ *
+ * NOTE: OpenRouter's /models endpoint returns pricing at the MODEL level
+ * (prompt/completion per-token in USD strings). It does NOT expose per-provider
+ * pricing breakdowns. The pricing shown here is the model-level rate used across
+ * all providers serving this model on OpenRouter.
  *
  * @param {object} model - Raw model entry from GET /api/v1/models
  * @returns {object} Normalized model descriptor.
@@ -112,8 +119,14 @@ export function normalizeModelEntry(model) {
     },
     // Capabilities
     supportedParameters: model.supported_parameters || [],
-    // Per-model provider routing (OpenRouter can serve the same model via multiple providers)
-    perProvider: model.id ? null : null, // placeholder — filled from top-level if available
+    // Per-model provider routing: OpenRouter /models does not expose per-provider
+    // pricing breakdowns. This field is reserved for future use if the API adds it.
+    // For provider-level info, see the OpenRouter /model/{id} endpoint docs.
+    providers: Array.isArray(model.providers)
+      ? model.providers
+      : model.top_provider
+        ? [{ id: model.top_provider.id || model.top_provider.name, name: model.top_provider.name }]
+        : [],
   };
 }
 
