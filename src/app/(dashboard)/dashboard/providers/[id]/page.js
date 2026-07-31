@@ -1637,7 +1637,7 @@ export default function ProviderDetailPage() {
 
       {/* OpenRouter-specific controls (model routing, provider mode, reasoning, pricing) */}
       {providerId === "openrouter" && (
-        <OpenRouterControl providerId={providerId} />
+        <OpenRouterControl providerId={providerId} connections={connections} />
       )}
 
       {/* Models */}

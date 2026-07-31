@@ -9,17 +9,18 @@ import { cn } from "@/shared/utils/cn";
  *
  * Renders ONLY on the OpenRouter provider detail page. Provides:
  *  - Model selection (from live OpenRouter /models endpoint, with pricing display)
- *  - Provider mode (auto / preferred / strict) — stored under settings.openrouterPreferences
+ *  - Provider mode (auto / preferred / strict) — persisted per-connection
  *  - Provider order/selection (which upstream providers OpenRouter may route to)
  *  - Reasoning settings when the selected model supports it
- *  - Pricing display from the live model catalog (model-level pricing, not per-provider)
+ *  - Pricing display fetched from a backend endpoint
  *
- * All fetch calls are isolated and fail gracefully — no backend route modifications
- * are required. Preferences are persisted via the existing /api/settings PATCH route
- * under the `openrouterPreferences` key.
+ * Routing config is persisted to the connection's providerSpecificData.openrouterRouting
+ * via the /api/openrouter/routing endpoint. Selected model and reasoning settings are
+ * persisted to the connection via PUT /api/providers/[id].
+ *
+ * Client body overrides always win (enforced by the backend applyRoutingToBody logic).
  */
 
-const SETTINGS_KEY = "openrouterPreferences";
 const MODES = [
   { value: "auto", label: "Auto", hint: "OpenRouter picks the best provider" },
   { value: "preferred", label: "Preferred", hint: "Prefer selected providers, fall back if down" },
@@ -40,61 +41,119 @@ const KNOWN_UPSTREAM_PROVIDERS = [
   "Together", "Fireworks", "Groq", "Hyperbolic", "Infermatic",
 ];
 
-/**
- * Format a per-token price (dollars per token from OpenRouter) as /M tokens.
- * OpenRouter returns e.g. 0.0000025 (per token) → display as $2.50/M
- */
-function formatPrice(perToken) {
-  const n = Number(perToken);
-  if (!Number.isFinite(n)) return "—";
-  if (n === 0) return "Free";
-  const perMillion = n * 1_000_000;
-  if (perMillion < 0.01) return `$${perMillion.toFixed(4)}/M`;
-  return `$${perMillion.toFixed(2)}/M`;
+function formatPrice(perMillion) {
+  const n = Number(perMillion);
+  if (!Number.isFinite(n) || n === 0) return n === 0 ? "Free" : "—";
+  if (n < 0.01) return `$${n.toFixed(4)}/M`;
+  return `$${n.toFixed(2)}/M`;
 }
 
-export default function OpenRouterControl({ providerId }) {
-  const [prefs, setPrefs] = useState(null);
+// ── Routing config ↔ UI preference mapping ─────────────────────────────────
+
+/**
+ * Convert OpenRouter routing config (order/only/allow_fallbacks) into
+ * UI preferences { mode, preferredProviders, providerOrder }.
+ */
+function routingToPrefs(routing) {
+  if (!routing || typeof routing !== "object") {
+    return { mode: "auto", preferredProviders: [], providerOrder: [] };
+  }
+  if (routing.only && Array.isArray(routing.only) && routing.only.length > 0) {
+    return {
+      mode: "strict",
+      preferredProviders: routing.only,
+      providerOrder: routing.only,
+    };
+  }
+  if (routing.order && Array.isArray(routing.order) && routing.order.length > 0) {
+    return {
+      mode: routing.allow_fallbacks === false ? "strict" : "preferred",
+      preferredProviders: routing.order,
+      providerOrder: routing.order,
+    };
+  }
+  return { mode: "auto", preferredProviders: [], providerOrder: [] };
+}
+
+/**
+ * Convert UI preferences into a routing config object for the backend.
+ * Returns null for "auto" mode (no routing config needed).
+ */
+function prefsToRouting(mode, preferredProviders) {
+  if (mode === "auto" || !preferredProviders.length) return null;
+  if (mode === "strict") {
+    return { only: [...preferredProviders], allow_fallbacks: false };
+  }
+  // preferred
+  return { order: [...preferredProviders], allow_fallbacks: true };
+}
+
+export default function OpenRouterControl({ providerId, connections }) {
+  const [routingPrefs, setRoutingPrefs] = useState(null);
+  const [selectedModel, setSelectedModel] = useState("");
+  const [reasoningEnabled, setReasoningEnabled] = useState(true);
+  const [reasoningEffort, setReasoningEffort] = useState("none");
   const [models, setModels] = useState([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState("");
   const [saving, setSaving] = useState(false);
   const [lastSynced, setLastSynced] = useState(null);
+  const [connectionId, setConnectionId] = useState(null);
 
   // Only render for openrouter
   const isOpenRouter = providerId === "openrouter";
 
-  // Load persisted preferences
-  const loadPrefs = useCallback(async () => {
-    try {
-      const res = await fetch("/api/settings", { cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json();
-      const stored = data[SETTINGS_KEY] || {};
-      setPrefs({
-        mode: stored.mode || "auto",
-        selectedModel: stored.selectedModel || "",
-        preferredProviders: Array.isArray(stored.preferredProviders) ? stored.preferredProviders : [],
-        reasoningEffort: stored.reasoningEffort || "none",
-        reasoningEnabled: stored.reasoningEnabled !== false,
-        providerOrder: Array.isArray(stored.providerOrder) ? stored.providerOrder : [],
-      });
-    } catch (err) {
-      // Fail silently — defaults will be used
-      setPrefs({
-        mode: "auto",
-        selectedModel: "",
-        preferredProviders: [],
-        reasoningEffort: "none",
-        reasoningEnabled: true,
-        providerOrder: [],
-      });
+  // Find the active OpenRouter connection
+  const activeConnection = (connections || []).find(
+    (c) => c.provider === "openrouter" && c.isActive !== false
+  );
+
+  // Sync connectionId when connections change
+  useEffect(() => {
+    if (activeConnection?.id) {
+      setConnectionId(activeConnection.id);
     }
-  }, []);
+  }, [activeConnection?.id]);
+
+  // Load persisted routing + model/reasoning from the connection
+  const loadPrefs = useCallback(async () => {
+    const connId = activeConnection?.id;
+    if (!connId) {
+      // No connection yet — show defaults
+      setRoutingPrefs({ mode: "auto", preferredProviders: [], providerOrder: [] });
+      setSelectedModel("");
+      setReasoningEnabled(true);
+      setReasoningEffort("none");
+      return;
+    }
+
+    try {
+      // Load routing config from /api/openrouter/routing
+      const routingRes = await fetch(
+        `/api/openrouter/routing?connectionId=${encodeURIComponent(connId)}`,
+        { cache: "no-store" }
+      );
+      const routingData = routingRes.ok ? await routingRes.json() : {};
+      const routing = routingData.routing || {};
+      setRoutingPrefs(routingToPrefs(routing));
+
+      // Load model/reasoning from connection's providerSpecificData
+      const connRes = await fetch(`/api/providers/${connId}`, { cache: "no-store" });
+      const connData = connRes.ok ? await connRes.json() : {};
+      const psd = connData.connection?.providerSpecificData || {};
+      setSelectedModel(psd.openrouterSelectedModel || activeConnection?.defaultModel || "");
+      setReasoningEnabled(psd.openrouterReasoningEnabled !== false);
+      setReasoningEffort(psd.openrouterReasoningEffort || "none");
+    } catch {
+      // Fail silently — defaults will be used
+      setRoutingPrefs({ mode: "auto", preferredProviders: [], providerOrder: [] });
+      setSelectedModel("");
+      setReasoningEnabled(true);
+      setReasoningEffort("none");
+    }
+  }, [activeConnection?.id, activeConnection?.defaultModel]);
 
   // Fetch live models from the OpenRouter backend catalog (/api/openrouter/models).
-  // This returns normalized model entries with model-level pricing from the user's
-  // own OpenRouter connection (authenticated). Pricing is per-model, not per-provider.
   const loadModels = useCallback(async () => {
     setModelsLoading(true);
     setModelsError("");
@@ -122,64 +181,124 @@ export default function OpenRouterControl({ providerId }) {
     loadModels();
   }, [isOpenRouter, loadPrefs, loadModels]);
 
-  // Persist preferences
-  const savePrefs = useCallback(async (next) => {
-    setPrefs(next);
+  // Also re-load prefs when connectionId changes (e.g. after adding a connection)
+  useEffect(() => {
+    if (isOpenRouter && connectionId) {
+      loadPrefs();
+    }
+  }, [isOpenRouter, connectionId, loadPrefs]);
+
+  // ── Save helpers ────────────────────────────────────────────────────────
+
+  /** Save routing config to the connection via /api/openrouter/routing */
+  const saveRouting = useCallback(async (nextPrefs) => {
+    if (!connectionId) return;
+    const routing = prefsToRouting(nextPrefs.mode, nextPrefs.preferredProviders);
+    try {
+      await fetch(
+        `/api/openrouter/routing?connectionId=${encodeURIComponent(connectionId)}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(routing !== null ? { routing } : {}),
+        }
+      );
+    } catch {
+      // Silent fail — local state still reflects user intent
+    }
+  }, [connectionId]);
+
+  /** Save model + reasoning to connection's providerSpecificData via PUT /api/providers/[id] */
+  const saveModelAndReasoning = useCallback(async (model, reEnabled, reEffort) => {
+    if (!connectionId) return;
+    try {
+      // Fetch current providerSpecificData to merge
+      const connRes = await fetch(`/api/providers/${connectionId}`, { cache: "no-store" });
+      const connData = connRes.ok ? await connRes.json() : {};
+      const existingPsd = connData.connection?.providerSpecificData || {};
+
+      const updatedPsd = {
+        ...existingPsd,
+        openrouterSelectedModel: model || undefined,
+        openrouterReasoningEnabled: reEnabled,
+        openrouterReasoningEffort: reEffort,
+      };
+      // Clean undefined keys
+      if (!model) delete updatedPsd.openrouterSelectedModel;
+
+      await fetch(`/api/providers/${connectionId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          defaultModel: model || null,
+          providerSpecificData: updatedPsd,
+        }),
+      });
+    } catch {
+      // Silent fail
+    }
+  }, [connectionId]);
+
+  /** Combined save: routing + model + reasoning */
+  const savePrefs = useCallback(async (nextPrefs, model, reEnabled, reEffort) => {
+    setRoutingPrefs(nextPrefs);
+    setSelectedModel(model);
+    setReasoningEnabled(reEnabled);
+    setReasoningEffort(reEffort);
     setSaving(true);
     try {
-      await fetch("/api/settings", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [SETTINGS_KEY]: next }),
-      });
-    } catch (err) {
-      // Silent fail — local state still reflects user intent
+      await Promise.all([
+        saveRouting(nextPrefs),
+        saveModelAndReasoning(model, reEnabled, reEffort),
+      ]);
     } finally {
       setSaving(false);
     }
-  }, []);
+  }, [saveRouting, saveModelAndReasoning]);
+
+  // ── Event handlers ──────────────────────────────────────────────────────
 
   const handleModeChange = (mode) => {
-    if (!prefs) return;
-    savePrefs({ ...prefs, mode });
+    if (!routingPrefs) return;
+    const next = { ...routingPrefs, mode };
+    savePrefs(next, selectedModel, reasoningEnabled, reasoningEffort);
   };
 
   const handleModelSelect = (modelId) => {
-    if (!prefs) return;
-    savePrefs({ ...prefs, selectedModel: modelId });
+    savePrefs(routingPrefs, modelId, reasoningEnabled, reasoningEffort);
   };
 
   const handleReasoningToggle = (enabled) => {
-    if (!prefs) return;
-    savePrefs({ ...prefs, reasoningEnabled: enabled });
+    savePrefs(routingPrefs, selectedModel, enabled, reasoningEffort);
   };
 
   const handleReasoningEffortChange = (effort) => {
-    if (!prefs) return;
-    savePrefs({ ...prefs, reasoningEffort: effort });
+    savePrefs(routingPrefs, selectedModel, reasoningEnabled, effort);
   };
 
   const togglePreferredProvider = (provider) => {
-    if (!prefs) return;
-    const set = new Set(prefs.preferredProviders);
+    if (!routingPrefs) return;
+    const set = new Set(routingPrefs.preferredProviders);
     if (set.has(provider)) set.delete(provider);
     else set.add(provider);
-    savePrefs({ ...prefs, preferredProviders: [...set] });
+    const next = { ...routingPrefs, preferredProviders: [...set], providerOrder: [...set] };
+    savePrefs(next, selectedModel, reasoningEnabled, reasoningEffort);
   };
 
   const moveProvider = (index, direction) => {
-    if (!prefs || !prefs.preferredProviders.length) return;
-    const list = [...prefs.preferredProviders];
+    if (!routingPrefs || !routingPrefs.preferredProviders.length) return;
+    const list = [...routingPrefs.preferredProviders];
     const target = index + direction;
     if (target < 0 || target >= list.length) return;
     [list[index], list[target]] = [list[target], list[index]];
-    savePrefs({ ...prefs, preferredProviders: list, providerOrder: list });
+    const next = { ...routingPrefs, preferredProviders: list, providerOrder: list };
+    savePrefs(next, selectedModel, reasoningEnabled, reasoningEffort);
   };
 
   // Selected model detail (for pricing display + reasoning capability)
   const selectedModelDetail = (() => {
-    if (!prefs?.selectedModel || models.length === 0) return null;
-    return models.find((m) => m.id === prefs.selectedModel) || null;
+    if (!selectedModel || models.length === 0) return null;
+    return models.find((m) => m.id === selectedModel) || null;
   })();
 
   // Pricing comes from the model catalog (model-level, not per-provider)
@@ -187,12 +306,12 @@ export default function OpenRouterControl({ providerId }) {
 
   // Heuristic: models from providers known for reasoning support the setting
   const modelSupportsReasoning = (() => {
-    if (!prefs?.selectedModel) return false;
-    const id = prefs.selectedModel.toLowerCase();
+    if (!selectedModel) return false;
+    const id = selectedModel.toLowerCase();
     return /(o3|o4|reasoning|deepseek-r|qwen.*qwq|claude.*thinking|gemini.*flash.*thinking|grok.*reason)/.test(id);
   })();
 
-  if (!isOpenRouter || !prefs) return null;
+  if (!isOpenRouter || !routingPrefs) return null;
 
   return (
     <Card padding="md" className="border-orange-500/20">
@@ -229,6 +348,12 @@ export default function OpenRouterControl({ providerId }) {
         </div>
       </div>
 
+      {!activeConnection && (
+        <div className="mb-4 rounded-[10px] border border-yellow-500/30 bg-yellow-500/5 p-3 text-xs text-yellow-600 dark:text-yellow-400">
+          No active OpenRouter connection. Add an API key connection first.
+        </div>
+      )}
+
       {/* Mode selector */}
       <div className="mb-5">
         <label className="mb-1.5 block text-sm font-medium text-text-main">Provider Mode</label>
@@ -239,14 +364,14 @@ export default function OpenRouterControl({ providerId }) {
               onClick={() => handleModeChange(mode.value)}
               className={cn(
                 "flex flex-col items-start gap-0.5 rounded-[10px] border p-3 text-left transition-all",
-                prefs.mode === mode.value
+                routingPrefs.mode === mode.value
                   ? "border-orange-500/50 bg-orange-500/5"
                   : "border-border hover:border-orange-500/30 hover:bg-surface-2/50"
               )}
             >
               <span className="flex items-center gap-1.5 text-sm font-semibold">
                 {mode.label}
-                {prefs.mode === mode.value && (
+                {routingPrefs.mode === mode.value && (
                   <span className="material-symbols-outlined text-[14px] text-orange-500">check_circle</span>
                 )}
               </span>
@@ -269,7 +394,7 @@ export default function OpenRouterControl({ providerId }) {
           )}
         </div>
         <Select
-          value={prefs.selectedModel}
+          value={selectedModel}
           onChange={(e) => handleModelSelect(e.target.value)}
           options={[
             { value: "", label: "— No default (let client decide) —" },
@@ -279,11 +404,11 @@ export default function OpenRouterControl({ providerId }) {
             })),
           ]}
           placeholder="Select a default model"
-          hint={prefs.selectedModel ? `openrouter/${prefs.selectedModel}` : "Optional — clients can still override per-request"}
+          hint={selectedModel ? `openrouter/${selectedModel}` : "Optional — clients can still override per-request"}
         />
 
         {/* Selected model pricing */}
-        {prefs.selectedModel && (
+        {selectedModel && (
           <div className="mt-2 flex flex-wrap items-center gap-2">
             {selectedModelPricing ? (
               <>
@@ -326,15 +451,15 @@ export default function OpenRouterControl({ providerId }) {
             </div>
             <div className="flex items-center gap-3">
               <Toggle
-                checked={prefs.reasoningEnabled}
+                checked={reasoningEnabled}
                 onChange={handleReasoningToggle}
                 size="sm"
               />
               <Select
-                value={prefs.reasoningEffort}
+                value={reasoningEffort}
                 onChange={(e) => handleReasoningEffortChange(e.target.value)}
                 options={REASONING_EFFORTS}
-                disabled={!prefs.reasoningEnabled}
+                disabled={!reasoningEnabled}
                 className="min-w-[120px]"
                 selectClassName="py-1.5 text-xs"
               />
@@ -344,26 +469,26 @@ export default function OpenRouterControl({ providerId }) {
       )}
 
       {/* Preferred providers (only meaningful for preferred/strict modes) */}
-      {prefs.mode !== "auto" && (
+      {routingPrefs.mode !== "auto" && (
         <div>
           <div className="mb-1.5 flex items-center gap-2">
             <label className="text-sm font-medium text-text-main">
-              {prefs.mode === "strict" ? "Allowed Providers" : "Preferred Providers"}
+              {routingPrefs.mode === "strict" ? "Allowed Providers" : "Preferred Providers"}
             </label>
-            {prefs.preferredProviders.length > 0 && (
-              <Badge variant="primary" size="sm">{prefs.preferredProviders.length} selected</Badge>
+            {routingPrefs.preferredProviders.length > 0 && (
+              <Badge variant="primary" size="sm">{routingPrefs.preferredProviders.length} selected</Badge>
             )}
           </div>
           <p className="mb-2 text-xs text-text-muted">
-            {prefs.mode === "strict"
+            {routingPrefs.mode === "strict"
               ? "OpenRouter will ONLY route to these providers. No fallback if all are down."
               : "OpenRouter prefers these providers but falls back to others if they are unavailable."}
           </p>
 
           {/* Selected providers with ordering */}
-          {prefs.preferredProviders.length > 0 && (
+          {routingPrefs.preferredProviders.length > 0 && (
             <div className="mb-2 flex flex-col gap-1">
-              {prefs.preferredProviders.map((provider, index) => (
+              {routingPrefs.preferredProviders.map((provider, index) => (
                 <div
                   key={provider}
                   className="flex items-center gap-2 rounded-[8px] border border-orange-500/20 bg-orange-500/5 px-2.5 py-1.5"
@@ -382,7 +507,7 @@ export default function OpenRouterControl({ providerId }) {
                   </button>
                   <button
                     onClick={() => moveProvider(index, 1)}
-                    disabled={index === prefs.preferredProviders.length - 1}
+                    disabled={index === routingPrefs.preferredProviders.length - 1}
                     className="p-0.5 text-text-muted hover:text-primary disabled:opacity-30"
                     title="Move down"
                   >
@@ -403,7 +528,7 @@ export default function OpenRouterControl({ providerId }) {
           {/* Available providers to add */}
           <div className="flex flex-wrap gap-1.5">
             {KNOWN_UPSTREAM_PROVIDERS
-              .filter((p) => !prefs.preferredProviders.includes(p))
+              .filter((p) => !routingPrefs.preferredProviders.includes(p))
               .map((provider) => (
                 <button
                   key={provider}
