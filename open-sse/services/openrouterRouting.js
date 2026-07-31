@@ -118,6 +118,11 @@ export function readRoutingConfig(providerSpecificData) {
  *   - the provider is "openrouter"
  *   - a non-null routing config exists on the credentials
  *
+ * Also injects body.reasoning_effort from the connection's stored
+ * openrouterReasoningEnabled / openrouterReasoningEffort when:
+ *   - the client hasn't already set reasoning_effort
+ *   - reasoning is enabled on the connection
+ *
  * @param {object} body - Chat request body (mutated in-place).
  * @param {string} provider - The provider id (e.g. "openrouter").
  * @param {object} credentials - Connection credentials with providerSpecificData.
@@ -125,11 +130,25 @@ export function readRoutingConfig(providerSpecificData) {
  */
 export function applyRoutingToBody(body, provider, credentials) {
   if (!body || provider !== "openrouter") return body;
-  if (body.provider !== undefined) return body; // client override wins
 
-  const routing = readRoutingConfig(credentials?.providerSpecificData);
-  if (routing) {
-    body.provider = routing;
+  // Provider routing config (order/only/allow_fallbacks)
+  if (body.provider === undefined) {
+    const routing = readRoutingConfig(credentials?.providerSpecificData);
+    if (routing) {
+      body.provider = routing;
+    }
   }
+
+  // Reasoning effort: inject from connection config when client hasn't set it.
+  // Do not assume every model/provider accepts the field; only pass the selected
+  // effort when the user explicitly enabled connection-level reasoning.
+  const psd = credentials?.providerSpecificData;
+  if (psd?.openrouterReasoningEnabled === true && !body.reasoning_effort) {
+    const effort = psd.openrouterReasoningEffort;
+    if (["low", "medium", "high"].includes(effort)) {
+      body.reasoning_effort = effort;
+    }
+  }
+
   return body;
 }
