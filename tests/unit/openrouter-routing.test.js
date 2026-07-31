@@ -165,4 +165,82 @@ describe("applyRoutingToBody", () => {
     expect(applyRoutingToBody(null, "openrouter", {})).toBeNull();
     expect(applyRoutingToBody(undefined, "openrouter", {})).toBeUndefined();
   });
+
+  it("injects reasoning_effort when openrouterReasoningEnabled is true", () => {
+    const body = { model: "anthropic/claude-3.5-sonnet", messages: [] };
+    const credentials = {
+      providerSpecificData: {
+        openrouterReasoningEnabled: true,
+        openrouterReasoningEffort: "high",
+      },
+    };
+    const result = applyRoutingToBody(body, "openrouter", credentials);
+    expect(result.reasoning_effort).toBe("high");
+  });
+
+  it("does NOT inject reasoning_effort when client already set it", () => {
+    const body = { model: "anthropic/claude-3.5-sonnet", messages: [], reasoning_effort: "low" };
+    const credentials = {
+      providerSpecificData: {
+        openrouterReasoningEnabled: true,
+        openrouterReasoningEffort: "high",
+      },
+    };
+    const result = applyRoutingToBody(body, "openrouter", credentials);
+    expect(result.reasoning_effort).toBe("low");
+  });
+
+  it("does NOT inject reasoning_effort when openrouterReasoningEnabled is false", () => {
+    const body = { model: "anthropic/claude-3.5-sonnet", messages: [] };
+    const credentials = {
+      providerSpecificData: {
+        openrouterReasoningEnabled: false,
+        openrouterReasoningEffort: "high",
+      },
+    };
+    const result = applyRoutingToBody(body, "openrouter", credentials);
+    expect(result.reasoning_effort).toBeUndefined();
+  });
+
+  it("does NOT inject reasoning_effort when effort is none", () => {
+    const body = { model: "anthropic/claude-3.5-sonnet", messages: [] };
+    const credentials = {
+      providerSpecificData: {
+        openrouterReasoningEnabled: true,
+        openrouterReasoningEffort: "none",
+      },
+    };
+    const result = applyRoutingToBody(body, "openrouter", credentials);
+    expect(result.reasoning_effort).toBeUndefined();
+  });
+
+  it("applies both routing config and reasoning_effort together", () => {
+    const body = { model: "anthropic/claude-3.5-sonnet", messages: [] };
+    const credentials = {
+      providerSpecificData: {
+        openrouterRouting: { order: ["anthropic"] },
+        openrouterReasoningEnabled: true,
+        openrouterReasoningEffort: "medium",
+      },
+    };
+    const result = applyRoutingToBody(body, "openrouter", credentials);
+    expect(result.provider).toEqual({ order: ["anthropic"] });
+    expect(result.reasoning_effort).toBe("medium");
+  });
+
+  it("client provider override still wins over stored routing", () => {
+    const body = { model: "openai/gpt-4o", messages: [], provider: { only: ["openai"] } };
+    const credentials = {
+      providerSpecificData: {
+        openrouterRouting: { order: ["anthropic"] },
+        openrouterReasoningEnabled: true,
+        openrouterReasoningEffort: "high",
+      },
+    };
+    const result = applyRoutingToBody(body, "openrouter", credentials);
+    // Client provider override wins
+    expect(result.provider).toEqual({ only: ["openai"] });
+    // But reasoning_effort is still injected (client didn't set it)
+    expect(result.reasoning_effort).toBe("high");
+  });
 });
