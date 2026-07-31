@@ -7,6 +7,7 @@ import { getCachedClaudeHeaders } from "../utils/claudeHeaderCache.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { stripUnsupportedParams } from "../translator/concerns/paramSupport.js";
+import { applyRoutingToBody } from "../services/openrouterRouting.js";
 
 // Auth header descriptors — derived from registry transport.auth, fallback to hardcoded defaults.
 const BEARER = { combined: true, header: "Authorization", scheme: "bearer" };
@@ -82,7 +83,7 @@ export class DefaultExecutor extends BaseExecutor {
     super(provider, PROVIDERS[provider] || PROVIDERS.openai);
   }
 
-  transformRequest(model, body) {
+  transformRequest(model, body, stream, credentials) {
     const transformed = this.applyJsonSchemaFallback(body);
 
     if (transformed && typeof transformed === "object") {
@@ -91,6 +92,13 @@ export class DefaultExecutor extends BaseExecutor {
         delete transformed.client_metadata;
       }
       stripUnsupportedParams(this.provider, model, transformed);
+    }
+
+    // OpenRouter: inject stored provider routing config into the request body.
+    // No-op for all other providers (applyRoutingToBody early-returns on non-openrouter).
+    // Client-provided body.provider takes precedence — stored config never overrides it.
+    if (this.provider === "openrouter" && transformed && typeof transformed === "object") {
+      applyRoutingToBody(transformed, this.provider, credentials);
     }
 
     return injectReasoningContent({ provider: this.provider, model, body: transformed });
